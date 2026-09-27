@@ -159,8 +159,8 @@ eve/
 ### Clone and install
 
 ```bash
-git clone <your-repo-url>
-cd eve
+git clone https://github.com/vipin03sh31/eve-healthcare-backend.git
+cd eve-healthcare-backend
 npm install
 ```
 
