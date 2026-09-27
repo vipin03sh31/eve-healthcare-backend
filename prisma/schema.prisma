@@ -1,0 +1,230 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// EVE Healthcare — Prisma Schema
+// PostgreSQL · Prisma ORM
+// ═══════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Role of the user within the platform.
+enum Role {
+  PATIENT
+  ADMIN
+}
+
+/// Lifecycle states of a booking.
+/// PENDING   – created, awaiting payment
+/// CONFIRMED – payment succeeded
+/// FAILED    – payment failed
+/// CANCELLED – cancelled by patient or admin
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  CANCELLED
+}
+
+/// Result of a simulated payment attempt.
+/// Only terminal states — no PENDING because payment is resolved synchronously
+/// in the simulated flow and recorded only after a definitive result.
+enum PaymentStatus {
+  SUCCESS
+  FAILED
+}
+
+/// Processing state of an inbound webhook event.
+enum WebhookEventStatus {
+  RECEIVED   // persisted but not yet processed
+  PROCESSED  // applied successfully
+  IGNORED    // duplicate or irrelevant event; safe to skip
+  FAILED     // processing error — may be retried
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// USER
+// Represents a registered patient (or admin) on the platform.
+// ───────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  phone        String?
+  role         Role     @default(PATIENT)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  bookings Booking[]
+
+  @@map("users")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// DIAGNOSTIC CENTRE
+// A physical lab / clinic that offers diagnostic tests.
+// ───────────────────────────────────────────────────────────────────────────
+
+model DiagnosticCentre {
+  id        String   @id @default(uuid())
+  name      String
+  address   String
+  city      String
+  state     String
+  pincode   String
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Tests offered by this centre (with centre-specific pricing).
+  centreTests CentreTest[]
+  bookings    Booking[]
+
+  @@map("diagnostic_centres")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// DIAGNOSTIC TEST
+// A catalogue entry for a type of test (e.g. "Complete Blood Count").
+// Price is NOT stored here — it is centre-specific via CentreTest.
+// ───────────────────────────────────────────────────────────────────────────
+
+model DiagnosticTest {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  /// Approximate turnaround time, e.g. "24 hours", "48 hours"
+  turnaround  String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  /// Offerings: which centres provide this test and at what price.
+  centreTests CentreTest[]
+
+  @@map("diagnostic_tests")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// CENTRE TEST  (join table)
+// Represents a specific diagnostic test offered by a specific centre,
+// with that centre's price.  This is what a patient actually books.
+// ───────────────────────────────────────────────────────────────────────────
+
+model CentreTest {
+  id        String   @id @default(uuid())
+  centreId  String   @map("centre_id")
+  testId    String   @map("test_id")
+  /// Price charged by this centre for this test.
+  price     Decimal  @db.Decimal(10, 2)
+  /// Whether this offering is currently available for booking.
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  centre   DiagnosticCentre @relation(fields: [centreId], references: [id], onDelete: Cascade)
+  test     DiagnosticTest   @relation(fields: [testId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  /// A centre can only list a given test once.
+  @@unique([centreId, testId])
+  /// Index for looking up all offerings of a specific test across centres.
+  @@index([testId])
+  @@map("centre_tests")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// BOOKING
+// Records a patient's appointment for a specific CentreTest offering.
+// ───────────────────────────────────────────────────────────────────────────
+
+model Booking {
+  id           String        @id @default(uuid())
+  userId       String        @map("user_id")
+  centreId     String        @map("centre_id")
+  centreTestId String        @map("centre_test_id")
+  scheduledAt  DateTime      @map("scheduled_at")
+  status       BookingStatus @default(PENDING)
+  /// Snapshot of the price at the time of booking (price may change later).
+  amount       Decimal       @db.Decimal(10, 2)
+  notes        String?
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  centre     DiagnosticCentre @relation(fields: [centreId], references: [id], onDelete: Restrict)
+  centreTest CentreTest       @relation(fields: [centreTestId], references: [id], onDelete: Restrict)
+  payment    Payment?
+
+  /// Index for listing a user's bookings efficiently.
+  @@index([userId])
+  /// Index for listing bookings at a centre.
+  @@index([centreId])
+  @@map("bookings")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PAYMENT
+// Records the outcome of a single simulated payment attempt for a booking.
+// One booking → at most one payment record.
+// ───────────────────────────────────────────────────────────────────────────
+
+model Payment {
+  id            String        @id @default(uuid())
+  bookingId     String        @unique @map("booking_id")
+  amount        Decimal       @db.Decimal(10, 2)
+  status        PaymentStatus
+  /// Unique ID returned by the (simulated) payment provider.
+  transactionId String?       @unique @map("transaction_id")
+  /// Raw response payload stored for audit / debugging.
+  providerMeta  Json?         @map("provider_meta")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@map("payments")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PAYMENT WEBHOOK EVENT
+// Persists every inbound webhook call from the simulated payment provider.
+// The unique constraint on (eventId) is the idempotency key:
+//   • The handler first attempts an INSERT with the eventId.
+//   • If the row already exists (duplicate delivery), it returns early
+//     without touching the Booking or Payment tables.
+// ───────────────────────────────────────────────────────────────────────────
+
+model PaymentWebhookEvent {
+  id          String             @id @default(uuid())
+  /// Provider-assigned unique event identifier — the idempotency key.
+  eventId     String             @unique @map("event_id")
+  /// e.g. "payment.success", "payment.failed"
+  eventType   String             @map("event_type")
+  /// The booking this event refers to (nullable — event may arrive before we can resolve it).
+  bookingId   String?            @map("booking_id")
+  /// Full raw payload received from the webhook POST body.
+  payload     Json
+  status      WebhookEventStatus @default(RECEIVED)
+  /// Error message if processing failed (used for observability / retries).
+  errorMessage String?           @map("error_message")
+  /// When the event was fully processed (or null if not yet).
+  processedAt DateTime?          @map("processed_at")
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  /// Index for looking up all webhook events for a given booking.
+  @@index([bookingId])
+  /// Index for replaying unprocessed or failed events.
+  @@index([status])
+  @@map("payment_webhook_events")
+}

@@ -1,0 +1,41 @@
+version: '3.9'
+
+# ── Services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL database ─────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       eve_healthcare
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Node.js API ─────────────────────────────────────────────────────────────
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env.docker               # See .env.docker.example for required variables
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/eve_healthcare?schema=public
+      NODE_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
